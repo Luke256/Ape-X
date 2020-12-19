@@ -298,11 +298,4 @@ class Board:
 
 if __name__=="__main__":
     a=GameClass()
-    while True:
-        act=int(input())
-        a.step(act)
-        m=a.env.grid
-        for i in range(4):
-            for j in range(4):
-                print("{} ".format(m[i*4+j]),end="")
-            print()
+    print(a.action_space.n)
