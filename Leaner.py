@@ -30,6 +30,9 @@ class Leaner:
         self.main_Q=self.build_network() #行動決定用のQネットワーク
         self.target_Q=self.build_network() #価値計算用のQネットワーク
 
+        while not param_queue.full():
+            param_queue.put([self.main_Q.get_weights(),self.target_Q.get_weights()])
+
     def build_network(self):
         #ネットワーク構築
         l_input=Input((self.window_length,)+self.env.observation_space.shape)
