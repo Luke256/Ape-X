@@ -6,7 +6,7 @@
 import numpy as np
 
 class SumTree:
-    write = 0　#書き込み位置
+    write = 0 #書き込み位置
 
     def __init__(self, capacity):
         self.capacity = capacity
