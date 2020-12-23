@@ -17,8 +17,8 @@ class Actor:
         epochs, #試行回数
         id_, #識別用ID
         num_actors, #Actorの総数
-        gamma=0.9, #割引率
         myenv=False, #これをTrueにするとenvにクラス名を渡せる
+        gamma=0.9, #割引率
         epsilon=0.4,
         alpha=7,
         buffer_size=100, #どのくらい経験がたまったらMemoryに送るか
@@ -43,16 +43,16 @@ class Actor:
         self.buffer_size=buffer_size
         self.update_param_interbal=update_param_interbal
 
-        self.main_Q=self.build_network() #行動決定用ネットワーク(Actorは行動のみなので価値計算をするQネットワークは不要)
+        self.main_Q=self.build_network() #行動決定用ネットワーク
+        self.target_Q=self.build_network() #価値計算用ネットワーク(TD誤差の計算のためだけに使う)
         
         #初期のLeanerの重みを取得
         while self.param_queue.empty():
             time.sleep(2)
-        
-        # print(self.param_queue.empty())
 
-        self.main_Q.set_weights(self.param_queue.get())
-        # print("actor")
+        param=self.param_queue.get()
+        self.main_Q.set_weights(param[0])
+        self.target_Q.set_weights(param[1])
 
     def build_network(self):
         #ネットワーク構築
@@ -68,7 +68,7 @@ class Actor:
         adv=Dense(units=256,activation="relu",name="dense_adv1_{}".format(self.id))(dense)
         adv=Dense(units=self.num_actions,name="dense_adv2_{}".format(self.id))(adv)
         y=concatenate([v,adv])
-        l_output = Lambda(lambda a: K.expand_dims(a[:, 0], -1) + (a[:, 1:] - tf.stop_gradient(K.mean(a[:,1:],keepdims=True))), output_shape=(self.num_actions,))(y)
+        l_output = Lambda(lambda a: K.expand_dims(a[:, 0], -1) + (a[:, 1:] - K.stop_gradient(K.mean(a[:,1:],keepdims=True))), output_shape=(self.num_actions,))(y)
         model=Model(inputs=l_input,outputs=l_output)
 
         return model
@@ -78,13 +78,15 @@ class Actor:
         batch=[] #Memoryに渡す前に経験をある程度蓄積させるためのバッファ
         t=0 #トータル試行回数
 
+        print("Actor{} starts".format(self.id))
+
         for epoch in range(self.epochs): #トレーニングループ
             state=self.env.reset()
             done=False
 
             while not done:
-                action=self.main_Q.predict(np.array([state])) #行動を決定
-                # print(action)
+                action=self.main_Q.predict(np.array([state]))[0] #行動を決定
+                
                 action=np.argmax(action)
 
                 old_state=state
@@ -104,14 +106,18 @@ class Actor:
                         for j in range(self.window_length-1):
                             batch_rewards+=(self.gamma**j)*batch[i][j+1][3]
                         # S[t]
-                        batch_state=batch[i][0][0]
+                        batch_state=np.array([batch[i][0][0]])
                         #S[t+n]
-                        batch_state_n=batch[i][self.window_length-1][0]
+                        batch_state_n=np.array([batch[i][self.window_length-1][0]])
                         #A[t]
                         batch_action=batch[i][0][2]
 
+                        #TD誤差の計算(長くてごめん!)
+                        a=(self.gamma**self.window_length)*self.target_Q.predict(batch_state_n)[0][np.argmax(self.main_Q.predict(batch_state_n)[0])]
+                        td_error=batch_rewards+a-self.main_Q.predict(batch_state)[0][batch_action]
+
                         # Memoryに送る内容の作成
-                        send=[batch_rewards,batch_state,batch_state_n,batch_action]
+                        send=[batch_rewards,batch_state,batch_state_n,batch_action,td_error]
                         # 送信
                         self.exp_queue.put(send)
                         #不要なので後で捨てておく
@@ -119,22 +125,33 @@ class Actor:
 
                     elif done:# これ以上連続した新しい経験は発生しないのでバッファの中身を全部送る
                         #処理は上のやつとほとんど一緒
-                        #(self.window_lengthがlen(batch[i])-1になったくらい)
+                        #(self.window_length が len(batch[i])になったくらい)
 
                         #Memoryに送る前処理
+                        # この部分はApe-Xで使われるTD誤差の計算式を理解していないと
+                        # 読み解くのは少し難しそう
+                        # 1.割引率を考慮しながら報酬を足していく
                         batch_rewards=0
                         for j in range(len(batch[i])-1):
                             batch_rewards+=(self.gamma**j)*batch[i][j+1][3]
-                        batch_state=batch[i][0][0]
-                        batch_state_n=batch[i][len(batch[i])-1][0]
+                        # S[t]
+                        batch_state=np.array([batch[i][0][0]])
+                        #S[t+n]
+                        batch_state_n=np.array([batch[i][len(batch[i])-1][0]])
+                        #A[t]
                         batch_action=batch[i][0][2]
 
+                        #TD誤差の計算(長くてごめん!)
+                        a=(self.gamma**len(batch[i]))*self.target_Q.predict(batch_state_n)[0][np.argmax(self.main_Q.predict(batch_state_n)[0])]
+                        td_error=batch_rewards+a-self.main_Q.predict(batch_state)[0][batch_action]
+
                         # Memoryに送る内容の作成
-                        send=[batch_rewards,batch_state,batch_state_n,batch_action]
+                        send=[batch_rewards,batch_state,batch_state_n,batch_action,td_error]
                         # 送信
                         self.exp_queue.put(send)
                         #不要なので後で捨てておく
                         remove_list.append(i)
+
 
                 #前から削除するとバグりそうので後ろから削除
                 remove_list.sort()
@@ -143,12 +160,22 @@ class Actor:
                     batch.pop(i)
                 
                 if t%self.update_param_interbal==0: #Qネットワークの重みを更新
+                    failed=0
                     while self.param_queue.empty():
-                        time.sleep(2)
-                    self.main_Q.set_weights(self.param_queue.get())
+                        if failed>50: #確実にLeanerが落ちているので終了
+                            return
+                        print("Actor{} failed to get new param.".format(self.id))
+                        failed+=1
+                        time.sleep(5)
+                    param=self.param_queue.get()
+                    self.main_Q.set_weights(param[0])
+                    self.target_Q.set_weights(param[1])
 
                 t+=1
                 
+                # if self.id==0:
+                #     self.env.render()
+
                 if done:
                     break
 
