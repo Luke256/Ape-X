@@ -8,6 +8,7 @@ from SumTree import SumTree
 import random
 import time
 import numpy as np
+import sys
 
 from game import GameClass
 
@@ -58,9 +59,11 @@ class Leaner:
         epochs, #試行回数
         exp_memory_size, #Memoryの上限(MemoryもLeanerで管理する)
         train_batch_size, #学習するときのバッチサイズ
+        leaner_working, #Leanerが動いているかどうか
         save_name, #保存名
         myenv=False, #クラスか名前か
         gamma=0.9, #割引率
+        update_target_interbal=1, #価値計算用のネットワークの更新頻度
         window_length=4 #考慮に入れるフレーム数
         ):
         #引数の変数を受け取る
@@ -72,6 +75,8 @@ class Leaner:
         self.epochs=epochs
         self.gamma=gamma
         self.save_name=save_name
+        self.update_target_interbal=update_target_interbal
+        self.leaner_working=leaner_working
         if myenv:
             self.env=env()
         else:
@@ -93,10 +98,9 @@ class Leaner:
 
     def build_network(self):
         #ネットワーク構築
-        l_input=Input((1,)+self.env.observation_space.shape)
+        l_input=Input((1,)+self.env.observation_space.shape,name="Input_Leaner")
         fltn=Flatten()(l_input)
         dense=Dense(units=256,activation="relu")(fltn)
-        dense=Dense(units=256,activation="relu")(dense)
         dense=Dense(units=256,activation="relu")(dense)
         v=Dense(units=256,activation="relu")(dense)
         v=Dense(units=1)(v)
@@ -107,7 +111,7 @@ class Leaner:
         model=Model(inputs=l_input,outputs=l_output)
 
         model.compile(optimizer="Adam",
-                        loss="mae",
+                        loss="mse",
                         metrics=["accuracy"])
 
         return model
@@ -124,60 +128,75 @@ class Leaner:
             
         print("Leaner starts")
 
-        for epoch in range(self.epochs):
-            train_batch=self.memory.sample(self.train_batch_size) #学習データの取得
+        try:
 
-            X=[] #学習データ
-            y=[] #教師データ
+            for epoch in range(self.epochs):
+                train_batch=self.memory.sample(self.train_batch_size) #学習データの取得
 
-            try:
+                X=[] #学習データ
+                y=[] #教師データ
+
                 for batch_ in train_batch:
+                    #[batch_rewards,batch_state,batch_state_n,batch_action,td_error]
                     batch=batch_[2]
-                    X.append(batch[1]) #状況
+                    X.append(batch[1][0]) #状況
 
                     #教師データ作成
-                    target=self.main_Q.predict(batch[2])[0] #関係ないところ(実際にしたactionでないもの)はmain_Qの予測で初期化
+                    target=self.main_Q.predict(batch[1])[0] #関係ないところ(実際にしたactionでないもの)はmain_Qの予測で初期化
 
-                    action=np.argmax(target)
+
+                    action=np.argmax(self.main_Q.predict(batch[2])[0])
+
                     a=(self.gamma**self.window_length)*self.target_Q.predict(batch[2])[0][action]
                     target[action]=batch[0]+a
 
                     y.append(target)
-            except TypeError:
-                print("Leaner failed to lean({}/{})".format(epoch,self.epochs))
-                print(self.memory.data.data)
-                continue
 
-            X=np.array(X)
-            y=np.array(y)
+                X=np.array(X)
+                y=np.array(y)
 
-            #価値計算用ネットワークを更新
-            self.target_Q.set_weights(self.main_Q.get_weights())
-            #行動決定用は学習・重みを更新
-            self.main_Q.fit(X,y,epochs=1,verbose=0)
+                if t%self.update_target_interbal==0: #価値計算用ネットワークを更新
+                    self.target_Q.set_weights(self.main_Q.get_weights())
+                #行動決定用は学習・重みを更新
 
-            #TD誤差の計算・更新
+                self.main_Q.fit(X,y,epochs=1,verbose=0)
 
-            for i in range(len(train_batch)):
-                q=self.main_Q.predict(train_batch[i][2][1])[0][train_batch[i][2][3]]
-                a=(self.gamma**self.window_length)*self.target_Q.predict(train_batch[i][2][2])[0][np.argmax(self.main_Q.predict(train_batch[i][2][2])[0])]
-                td_error=train_batch[i][2][0]+a-q
-                train_batch[i][2][4]=td_error
-                train_batch[i][1]=td_error
-                self.memory.update_p(train_batch[i][0],td_error)
+                #TD誤差の計算・更新
 
-            #重みの共有
-            while not self.param_queue.full():
-                self.param_queue.put([self.main_Q.get_weights(),self.target_Q.get_weights()])
+                for i in range(len(train_batch)):
 
-            #exp_queueから経験を取得・Memoryに入れる
-            while not self.exp_queue.empty():
-                batch=self.exp_queue.get()
-                self.memory.add(batch[4],batch)
+                    q=self.main_Q.predict(train_batch[i][2][1])[0][train_batch[i][2][3]]
+                    a=(self.gamma**self.window_length)*self.target_Q.predict(train_batch[i][2][2])[0][np.argmax(self.main_Q.predict(train_batch[i][2][2])[0])]
+                    td_error=train_batch[i][2][0]+a-q
+                    td_error=abs(td_error)
 
-            print("Leaner finished leanring({}/{})".format(epoch,self.epochs))
+                    train_batch[i][2][4]=td_error
+                    train_batch[i][1]=td_error
+                    self.memory.update_p(train_batch[i][0],td_error)
+
+                #重みの共有
+                while not self.param_queue.full():
+                    self.param_queue.put([self.main_Q.get_weights(),self.target_Q.get_weights()])
+
+                #exp_queueから経験を取得・Memoryに入れる
+                while not self.exp_queue.empty():
+                    batch=self.exp_queue.get()
+                    self.memory.add(batch[4],batch)
+
+                print("Leaner finished leanring({}/{})".format(epoch,self.epochs))
+
+        except KeyboardInterrupt:
+            self.main_Q.save(self.save_name)
+            print("model has been saved with name'"+self.save_name+"'")
+            self.leaner_working=False
+
+            print("Learning was stopped by user")
+            return
 
         self.main_Q.save(self.save_name)
+        print("model has been saved with name '"+self.save_name+"'")
 
+
+        self.leaner_working[0]=False
         print("Leaner finished")
         return
