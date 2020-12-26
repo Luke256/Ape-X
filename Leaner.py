@@ -4,11 +4,13 @@ import keras.backend as K
 import tensorflow as tf
 from keras import Model
 from keras.layers import Dense, Flatten, Input, Lambda, concatenate
+from keras.models import load_model
 from SumTree import SumTree
 import random
 import time
 import numpy as np
 import sys
+from pathlib import Path
 
 from game import GameClass
 
@@ -38,7 +40,7 @@ class Memory:#経験を優先順位をつけて保存しておく
 
             (idx,p_sample,data)=self.data.get(p)
             # idx:使っている二分木上でのインデックス(優先度を更新するときに使う)
-            # p_sample:そのデータの優先度
+            # p_sample:そのデータの優先度（実際には使ってない）
             # data:データ
             batch.append([idx,p_sample,data])
 
@@ -56,15 +58,16 @@ class Leaner:
         env, #トレーニング環境
         exp_queue, #Memory
         param_queue, #Actorへの提供用
-        epochs, #試行回数
+        num_actions, #行動の種類数
         exp_memory_size, #Memoryの上限(MemoryもLeanerで管理する)
         train_batch_size, #学習するときのバッチサイズ
-        leaner_working, #Leanerが動いているかどうか
+        actor_working, #Actorが動いているかどうか
         save_name, #保存名
         myenv=False, #クラスか名前か
         gamma=0.9, #割引率
-        update_target_interbal=1, #価値計算用のネットワークの更新頻度
-        window_length=4 #考慮に入れるフレーム数
+        update_target_interbal=10, #価値計算用のネットワークの更新頻度
+        load_model_path=None,
+        window_length=3 #考慮に入れるフレーム数
         ):
         #引数の変数を受け取る
         self.exp_queue=exp_queue
@@ -72,20 +75,22 @@ class Leaner:
         self.exp_memory_size=exp_memory_size
         self.train_batch_size=train_batch_size
         self.window_length=window_length
-        self.epochs=epochs
         self.gamma=gamma
         self.save_name=save_name
         self.update_target_interbal=update_target_interbal
-        self.leaner_working=leaner_working
+        self.actor_working=actor_working
         if myenv:
             self.env=env()
         else:
             self.env=gym.make(env)
-        self.num_actions=self.env.action_space.n
+        self.num_actions=num_actions
 
         #ネットワーク定義
         self.main_Q=self.build_network() #行動決定用のQネットワーク
         self.target_Q=self.build_network() #価値計算用のQネットワーク
+        if load_model_path!=None:
+            self.main_Q=load_model(load_model_path)
+        self.target_Q.set_weights(self.main_Q.get_weights())
 
         #メモリ作成
         self.memory=Memory(self.exp_memory_size)
@@ -102,10 +107,11 @@ class Leaner:
         fltn=Flatten()(l_input)
         dense=Dense(units=256,activation="relu")(fltn)
         dense=Dense(units=256,activation="relu")(dense)
+        dense=Dense(units=256,activation="relu")(dense)
         v=Dense(units=256,activation="relu")(dense)
-        v=Dense(units=1)(v)
+        v=Dense(units=1,activation="linear")(v)
         adv=Dense(units=256,activation="relu")(dense)
-        adv=Dense(units=self.num_actions)(adv)
+        adv=Dense(units=self.num_actions,activation="linear")(adv)
         y=concatenate([v,adv])
         l_output = Lambda(lambda a: K.expand_dims(a[:, 0], -1) + (a[:, 1:] - K.stop_gradient(K.mean(a[:,1:],keepdims=True))), output_shape=(self.num_actions,))(y)
         model=Model(inputs=l_input,outputs=l_output)
@@ -116,12 +122,65 @@ class Leaner:
 
         return model
 
+    def make_batch(self):
+        train_batch=self.memory.sample(self.train_batch_size)
+        train_batch=np.array(train_batch)
+        batch=train_batch[:,2] #データだけ取り出す
+
+        #このままだと
+        #[[a_1,b_1,c_1],[a_2,b_2,c_2]...[a_n,b_n,c_n]]
+        #となっているから、これを
+        #[[a_1,a_2,...,a_n],[b_1,b_2,...,b_n],[c_1,c_2,...,c_n]]
+        #にする
+        #(こうすると推論のときに一気にできるので高速に処理ができる)
+
+        rewards_batch=[] #Reward[t]
+        state_batch=[] #State[t]
+        state_n_batch=[] #State[t+n]
+        action_batch=[] #Action[n]
+
+        for i in batch:
+            rewards_batch.append(i[0])
+            state_batch.append(i[1][0])
+            state_n_batch.append(i[2][0])
+            action_batch.append(i[3])
+
+        rewards_batch=np.array(rewards_batch)
+        state_batch=np.array(state_batch)
+        state_n_batch=np.array(state_n_batch)
+        action_batch=np.array(action_batch)
+
+
+        #教師データ作成
+        batch_size=len(state_batch)
+        y=self.main_Q.predict(state_batch,batch_size=batch_size)
+
+        #予め推論をしておく
+        main_predict=self.main_Q.predict(state_n_batch,batch_size=batch_size)
+        target_predict=self.target_Q.predict(state_n_batch,batch_size=batch_size)
+
+        for i in range(batch_size):
+            action=np.argmax(main_predict[i]) #mainQを使って行動選択
+            q=target_predict[i][action] #targetQでQ値を出す
+
+            target=rewards_batch[i]+(self.gamma**self.window_length)*q #Q(State(t),Action(t)) として出すべき値(目標の値)
+
+            td_error=y[i][action_batch[i]]-target #TD誤差を計算
+            self.memory.update_p(train_batch[i][0],abs(td_error)) #その繊維の優先度を更新
+
+            y[i][action_batch[i]]=target #教師データに目標の値を代入
+
+        return state_batch,y
+
+
+
+
     def run(self):
         t=0 #トータル試行回数
 
         while self.memory.length()<self.train_batch_size:
             print("Leaner is waiting for enough experience to train")
-            while not self.exp_queue.empty():
+            while not self.exp_queue.empty(): #exp_queueにある経験情報を全てMemoryに追加
                 batch=self.exp_queue.get()
                 self.memory.add(batch[4],batch)
             time.sleep(5)
@@ -130,65 +189,45 @@ class Leaner:
 
         try:
 
-            for epoch in range(self.epochs):
-                train_batch=self.memory.sample(self.train_batch_size) #学習データの取得
+            while True:
+                #Actorが一つも動いていなければ終了
+                working=False
+                for i in self.actor_working:
+                    if i:
+                        working=True
+                        break
+                if not working:
+                    break
 
-                X=[] #学習データ
-                y=[] #教師データ
-
-                for batch_ in train_batch:
-                    #[batch_rewards,batch_state,batch_state_n,batch_action,td_error]
-                    batch=batch_[2]
-                    X.append(batch[1][0]) #状況
-
-                    #教師データ作成
-                    target=self.main_Q.predict(batch[1])[0] #関係ないところ(実際にしたactionでないもの)はmain_Qの予測で初期化
-
-
-                    action=np.argmax(self.main_Q.predict(batch[2])[0])
-
-                    a=(self.gamma**self.window_length)*self.target_Q.predict(batch[2])[0][action]
-                    target[action]=batch[0]+a
-
-                    y.append(target)
-
+                #サンプル作成
+                X,y=self.make_batch()
                 X=np.array(X)
                 y=np.array(y)
 
                 if t%self.update_target_interbal==0: #価値計算用ネットワークを更新
                     self.target_Q.set_weights(self.main_Q.get_weights())
                 #行動決定用は学習・重みを更新
-
                 self.main_Q.fit(X,y,epochs=1,verbose=0)
 
-                #TD誤差の計算・更新
-
-                for i in range(len(train_batch)):
-
-                    q=self.main_Q.predict(train_batch[i][2][1])[0][train_batch[i][2][3]]
-                    a=(self.gamma**self.window_length)*self.target_Q.predict(train_batch[i][2][2])[0][np.argmax(self.main_Q.predict(train_batch[i][2][2])[0])]
-                    td_error=train_batch[i][2][0]+a-q
-                    td_error=abs(td_error)
-
-                    train_batch[i][2][4]=td_error
-                    train_batch[i][1]=td_error
-                    self.memory.update_p(train_batch[i][0],td_error)
-
                 #重みの共有
+                #1.Queueに残っている古いデータの除去
+                while not self.param_queue.empty():
+                    self.param_queue.get()
+                #2.Queueが満杯になるまで入れる
                 while not self.param_queue.full():
                     self.param_queue.put([self.main_Q.get_weights(),self.target_Q.get_weights()])
+
 
                 #exp_queueから経験を取得・Memoryに入れる
                 while not self.exp_queue.empty():
                     batch=self.exp_queue.get()
                     self.memory.add(batch[4],batch)
 
-                print("Leaner finished leanring({}/{})".format(epoch,self.epochs))
+                t+=1
 
         except KeyboardInterrupt:
             self.main_Q.save(self.save_name)
             print("model has been saved with name'"+self.save_name+"'")
-            self.leaner_working=False
 
             print("Learning was stopped by user")
             return
@@ -196,7 +235,5 @@ class Leaner:
         self.main_Q.save(self.save_name)
         print("model has been saved with name '"+self.save_name+"'")
 
-
-        self.leaner_working[0]=False
         print("Leaner finished")
         return

@@ -7,43 +7,48 @@ from keras.models import load_model
 import gym
 import numpy as np
 import ctypes
+from game import GameClass
 
-def A(exp_queue,param_queue,id,num_actors,leaner_working):
+def A(exp_queue,param_queue,nb_steps,num_actions,id,num_actors,actor_working):
     if id==0:
-        actor=Actor("CartPole-v0",exp_queue,param_queue,id,num_actors,leaner_working,update_param_interbal=20,visualize=True)
+        actor=Actor("CartPole-v0",exp_queue,param_queue,nb_steps,num_actions,id,num_actors,actor_working)
     else:
-        actor=Actor("CartPole-v0",exp_queue,param_queue,id,num_actors,leaner_working,update_param_interbal=20)
+        actor=Actor("CartPole-v0",exp_queue,param_queue,nb_steps,num_actions,id,num_actors,actor_working)
     actor.run()
     return
 
-def L(exp_queue,param_queue,epochs,memory_size,train_batch_size,leaner_working):
-    leaner=Leaner("CartPole-v0",exp_queue,param_queue,epochs,memory_size,train_batch_size,leaner_working,"CartPole",update_target_interbal=5)
+def L(exp_queue,param_queue,num_actions,memory_size,train_batch_size,actor_working,save_name):
+    leaner=Leaner("CartPole-v0",exp_queue,param_queue,num_actions,memory_size,train_batch_size,actor_working,save_name
+    # ,load_model_path="CartPole.h5"
+    )
     leaner.run()
     return
     
 
 if __name__=="__main__":
     num_actors=5
-    epochs=10000
+    num_actions=2
+    nb_steps=10000
     memory_size=100000
     train_batch_size=10
+    save_name="CartPole.h5"
 
 
     exp_queue=mp.Queue(5000)
-    param_queue=mp.Queue(int(num_actors*1.2))
-    leaner_working=mp.Value(ctypes.c_uint*1)
-    leaner_working[0]=True
+    param_queue=mp.Queue(int(num_actors))
+    actor_working=mp.Value(ctypes.c_uint*num_actors)
+    for i in range(num_actors):
+        actor_working[i]=False
+
 
     ps=[]
-    ps.append(mp.Process(target=L, args=(exp_queue,param_queue,epochs,memory_size,train_batch_size,leaner_working)))
-
-    for i in range(num_actors):
-        ps.append(mp.Process(target=A, args=(exp_queue,param_queue,i,num_actors,leaner_working)))
+    ps.append(mp.Process(target=L, args=(exp_queue,param_queue,num_actions,memory_size,train_batch_size,actor_working,save_name)))
 
     try:
-        for p in ps:
-            p.start()
-            time.sleep(1)
+        for i in range(num_actors):
+            ps.append(mp.Process(target=A, args=(exp_queue,param_queue,nb_steps,num_actions,i,num_actors,actor_working)))
+            ps[i].start()
+            time.sleep(0.5)
 
         for p in ps:
             p.join()
