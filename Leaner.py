@@ -12,8 +12,6 @@ import numpy as np
 import sys
 from pathlib import Path
 
-from game import GameClass
-
 class Memory:#経験を優先順位をつけて保存しておく
     # このMenmoryについての説明は
     # https://qiita.com/omuram/items/994ffe8d6deec509ac11#%E3%82%B5%E3%83%B3%E3%83%97%E3%83%AA%E3%83%B3%E3%82%B0
