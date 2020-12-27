@@ -1,6 +1,5 @@
 #-*- coding:utf-8 -*-
 import gym
-from game import GameClass
 from keras.layers import Dense,Input,concatenate,Lambda,Flatten
 from keras import backend as K
 from keras import Model
@@ -17,12 +16,13 @@ class Actor:
         exp_queue, #Memory用のmp.Queue
         param_queue, #Leaner用のmp.Queue
         nb_steps, #学習回数
+        warmup_steps, #ランダムに行動する回数
         num_actions, #行動の種類数
         id_, #識別用ID
         num_actors, #Actorの総数
         actor_working, #どのActorが動いていてどのActorが動いていないか
         myenv=False, #これをTrueにするとenvにクラス名を渡せる
-        gamma=0.9, #割引率
+        gamma=0.99, #割引率
         max_epsilon=0.4,
         alpha=7,
         update_param_interbal=100, #何回試行したらパラメータを更新するか
@@ -46,6 +46,10 @@ class Actor:
         self.visualize=visualize
         self.nb_steps=nb_steps
         self.actor_working=actor_working
+        self.warmup_steps=warmup_steps
+
+        if self.warmup_steps>self.nb_steps:
+            raise ValueError("warmup_steps must be lower than nb_steps.")
 
         #εの計算
         if num_actors <= 1:
@@ -120,7 +124,7 @@ class Actor:
         print("Actor{} starts".format(self.id))
 
         try:
-            while True: #Leanerが生きている限り経験を送る
+            while True:
                 state=self.env.reset()
                 done=False
 
@@ -132,7 +136,7 @@ class Actor:
                     #行動を決定
                     action=self.main_Q.predict(np.array([[state]]))
                     action=np.argmax(action[0])
-                    if self.epsilon>=random.random() and (not self.visualize):
+                    if t<self.warmup_steps or (self.epsilon>=random.random() and (not self.visualize)):
                         action=random.randrange(0,self.num_actions)
 
                     old_state=state
@@ -198,7 +202,7 @@ class Actor:
                     break
 
                 epoch+=1
-                print("Actor{} episode:{} nb_action:{}({}) reward:{} step:{}".format(self.id,epoch,t,self.nb_steps,epoch_reward,step))
+                print("Actor{} episode:{} nb_step:{}({}) reward:{} step:{}".format(self.id,epoch,t,self.nb_steps,epoch_reward,step))
         
         except KeyboardInterrupt:
             print("Actor{} ended".format(self.id))

@@ -64,8 +64,8 @@ class Leaner:
         actor_working, #Actorが動いているかどうか
         save_name, #保存名
         myenv=False, #クラスか名前か
-        gamma=0.9, #割引率
-        update_target_interbal=10, #価値計算用のネットワークの更新頻度
+        gamma=0.99, #割引率
+        update_target_interbal=100, #価値計算用のネットワークの更新頻度
         load_model_path=None,
         window_length=3 #考慮に入れるフレーム数
         ):
@@ -198,6 +198,11 @@ class Leaner:
                         break
                 if not working:
                     break
+                
+                #exp_queueから経験を取得・Memoryに入れる
+                while not self.exp_queue.empty():
+                    batch=self.exp_queue.get()
+                    self.memory.add(batch[4],batch)
 
                 #サンプル作成
                 X,y=self.make_batch()
@@ -209,19 +214,11 @@ class Leaner:
                 #行動決定用は学習・重みを更新
                 self.main_Q.fit(X,y,epochs=1,verbose=0)
 
-                #重みの共有
-                #1.Queueに残っている古いデータの除去
-                while not self.param_queue.empty():
-                    self.param_queue.get()
-                #2.Queueが満杯になるまで入れる
+                #Queueが満杯になるまで入れる
                 while not self.param_queue.full():
                     self.param_queue.put([self.main_Q.get_weights(),self.target_Q.get_weights()])
 
 
-                #exp_queueから経験を取得・Memoryに入れる
-                while not self.exp_queue.empty():
-                    batch=self.exp_queue.get()
-                    self.memory.add(batch[4],batch)
 
                 t+=1
 
